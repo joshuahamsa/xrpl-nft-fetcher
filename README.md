@@ -39,7 +39,7 @@ This script fetches and processes NFTs from the XRP Ledger based on a specific i
 
 4. **Run the script:**
    ```bash
-   python fetcher3.py
+   python fetcher.py
    ```
 
 ## Usage
@@ -49,8 +49,9 @@ This script fetches and processes NFTs from the XRP Ledger based on a specific i
    - The script will automatically handle pagination and process all NFTs in the specified collection.
 
 2. **Database:**
-   - The script uses an SQLite database (`daimyos.db` by default) to store the NFT data. It will create a table named `nfts` if it doesn't exist.
+   - The script uses an SQLite database (`nftdata.db` by default) to store the NFT data. It will create a table named `nfts` if it doesn't exist.
    - Each NFT's attributes are stored in individual columns, allowing for easy querying and analysis.
+   - Replace the trait1, trait2, etc with the names of the traits for the collection you're fetching.
 
 3. **IPFS Gateways:**
    - The script supports multiple IPFS gateways. If one gateway fails or is slow, the script will automatically retry with another.
