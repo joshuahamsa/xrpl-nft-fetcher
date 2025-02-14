@@ -1,84 +1,100 @@
 # XRPL NFT Metadata Fetcher
 
-This script fetches and processes NFTs from the XRP Ledger based on a specific issuer and taxon. It retrieves NFT metadata from IPFS and stores the relevant attributes in an SQLite database.
+A Node.js script that retrieves NFTs issued by a specified XRPL account and collection taxon. The script fetches detailed NFT information (including metadata hosted on HTTP/IPFS), decodes hex-encoded URIs, and dynamically stores NFT details along with their attributes into a local SQLite database.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+- [How It Works](#how-it-works)
+- [Dependencies](#dependencies)
+- [Contributing](#contributing)
+
+## Overview
+
+This script connects to the XRP Ledger (XRPL) using the `xrpl` library and fetches NFTs minted by a given issuer with a specified taxon. For each NFT, it:
+
+1. Retrieves detailed NFT information using the `nft_info` command.
+2. Decodes the NFT's URI from hex to UTF-8.
+3. Fetches JSON metadata from the decoded URI (including IPFS links).
+4. Dynamically updates a local SQLite database (`nfts.db`) to store the NFT data and its attributes.
+
+The dynamic database schema allows new NFT traits to be stored as separate columns by sanitizing attribute names and altering the table if needed.
 
 ## Features
 
-- Connects to multiple WebSocket servers to fetch NFTs from the XRP Ledger.
-- Handles pagination using the `marker` parameter to retrieve all NFTs in a collection.
-- Retrieves metadata from IPFS, supporting multiple IPFS gateways with retries and exponential backoff.
-- Stores NFT data, including specific attributes, in an SQLite database.
-
-## Requirements
-
-- Python 3.7+
-- Required Python packages:
-  - `asyncio`
-  - `websockets`
-  - `requests`
-  - `sqlite3`
+- **NFT Retrieval:** Query NFTs by issuer and taxon using the XRPL's `nfts_by_issuer` command.
+- **Metadata Handling:** Decode hex-encoded URIs and fetch JSON metadata, including support for IPFS links.
+- **Dynamic Schema:** Automatically create or add columns in the SQLite database to store NFT traits.
+- **SQLite Integration:** Store NFT details, owner information, and custom attributes in a local database.
 
 ## Installation
 
-1. **Clone the repository:**
+1. **Clone the Repository:**
+
    ```bash
-   git clone https://github.com/yourusername/nft-metadata-fetcher.git
-   cd nft-metadata-fetcher
+   git clone https://github.com/joshuahamsa/xrpl-nft-fetcher.git
+   cd xrpl-nft-metadata-fetcher
    ```
 
-2. **Create and activate a virtual environment (optional but recommended):**
+2. **Install Dependencies:**
+
+   Ensure you have [Node.js](https://nodejs.org/) installed, then run:
+
    ```bash
-   python3 -m venv xrplenv
-   source xrplenv/bin/activate  # On Windows use `xrplenv\Scripts\activate`
+   npm install xrpl sqlite3
    ```
 
-3. **Install the required packages:**
-   ```bash
-   pip install asyncio websockets requests
-   ```
-
-4. **Run the script:**
-   ```bash
-   python fetcher.py
-   ```
+   *Note: The script dynamically imports `node-fetch` when needed.*
 
 ## Usage
 
-1. **Configure the Script:**
-   - Modify the `issuer_address` and `taxon` variables in the script to match the issuer and taxon of the NFTs you want to fetch.
-   - The script will automatically handle pagination and process all NFTs in the specified collection.
-   - Replace the trait1, trait2, etc with the names of the traits for the collection you're fetching.
+Run the script by providing the issuer's XRPL address and the taxon number as command-line arguments:
 
-2. **Database:**
-   - The script uses an SQLite database (`nftdata.db` by default) to store the NFT data. It will create a table named `nfts` if it doesn't exist.
-   - Each NFT's attributes are stored in individual columns, allowing for easy querying and analysis.
+```bash
+node fetcher.js <issuer_address> <taxon>
+```
 
-3. **IPFS Gateways:**
-   - The script supports multiple IPFS gateways. If one gateway fails or is slow, the script will automatically retry with another.
+**Example:**
 
-4. **WebSocket Servers:**
-   - The script rotates through a list of WebSocket servers (`wss://s1.ripple.com/`, `wss://xrplcluster.com/`, `wss://s2.ripple.com/`) to ensure reliable data retrieval from the XRP Ledger.
+```bash
+node fetcher.js rExampleIssuer 12345
+```
 
-## Logging
+The script will:
 
-- The script logs its operations at the `INFO` level by default. Detailed responses and errors are logged at the `DEBUG` level.
-- You can modify the logging level in the script by adjusting the `logging.basicConfig(level=logging.INFO)` line.
+- Create (or update) an SQLite database named `nfts.db`.
+- Connect to the XRPL and query for NFTs issued by the specified address with the given taxon.
+- For each NFT, fetch detailed information and metadata.
+- Store the NFT data along with any dynamic attributes into the database.
 
-## Troubleshooting
+## How It Works
 
-- **Not fetching all NFTs?**
-  - Ensure that the `limit` parameter is set correctly and that the script is handling the `marker` parameter for pagination.
-  
-- **Connection Issues?**
-  - If one of the WebSocket servers is down or not responding, the script will automatically try the next server in the list.
+1. **Database Setup:**  
+   The script initializes an SQLite database (`nfts.db`) and creates a base table (`nfts`) if it doesn't exist. It uses promise-based wrappers for SQLite operations.
 
-- **IPFS Issues?**
-  - If IPFS metadata isn't being fetched, the script will retry using different gateways. Ensure you have a stable internet connection.
+2. **Dynamic Columns for Traits:**  
+   NFT metadata often includes attributes (traits). The script sanitizes these attribute names and dynamically alters the SQLite table to add new columns as needed.
+
+3. **Fetching NFT Data:**
+   - **nfts_by_issuer:** The script uses the XRPL client to fetch NFTs by issuer, iterating through paginated results.
+   - **nft_info:** For each NFT, detailed info (including the hex-encoded URI) is retrieved.
+   - **URI Decoding & Metadata Fetching:** The hex-encoded URI is decoded to UTF-8, then the script fetches JSON metadata (handling IPFS links by redirecting to a public gateway).
+
+4. **Storing Data:**  
+   The NFT details and its metadata (including any dynamic attributes) are stored in the SQLite database. Existing records are updated via an `INSERT OR REPLACE` query.
+
+5. **Cleanup:**  
+   Once all NFTs are processed, the XRPL client disconnects and the database connection is closed.
+
+## Dependencies
+
+- [xrpl](https://www.npmjs.com/package/xrpl)
+- [sqlite3](https://www.npmjs.com/package/sqlite3)
+- [node-fetch](https://www.npmjs.com/package/node-fetch) *(dynamically imported)*
 
 ## Contributing
 
-Contributions are welcome! Feel free to submit issues, feature requests, or pull requests.
-
-## License
-
-This project is licensed under the MIT License. See the `LICENSE` file for more details.
+Contributions are welcome! Please open an issue or submit a pull request if you have suggestions or improvements.
