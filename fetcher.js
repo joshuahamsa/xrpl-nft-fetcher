@@ -1,7 +1,14 @@
 const xrpl = require("xrpl");
 const sqlite3 = require("sqlite3").verbose();
+const fs = require("fs");
+const path = require("path");
 
 let fetch; // imported dynamically later
+
+// ----------------------
+// Config
+// ----------------------
+const IPFS_GATEWAY = process.env.IPFS_GATEWAY?.replace(/\/+$/, "") || "https://ipfs.io/ipfs";
 
 // ----------------------
 // SQLite Promise Wrappers
@@ -62,18 +69,23 @@ async function ensureColumnExists(columnName) {
 }
 
 // Store NFT details and metadata into the database.
-async function storeNFTInDatabase(nftData, metadata) {
+async function storeNFTInDatabase(nftData, metadata, localImagePath = null) {
   // Base NFT data from the XRPL and metadata
   let data = {
     nft_id: nftData.nft_id,
     is_burned: nftData.is_burned ? 1 : 0,
     owner: nftData.owner,
-    name: metadata.name || "",
-    image: metadata.image || ""
+    name: metadata?.name || "",
+    image: metadata?.image || ""
   };
 
+  if (localImagePath) {
+    await ensureColumnExists("local_image");
+    data.local_image = localImagePath;
+  }
+
   // Process each trait from metadata.attributes
-  if (metadata.attributes && Array.isArray(metadata.attributes)) {
+  if (metadata?.attributes && Array.isArray(metadata.attributes)) {
     for (const attr of metadata.attributes) {
       const traitType = attr.trait_type;
       const traitValue = attr.value;
@@ -99,6 +111,48 @@ async function storeNFTInDatabase(nftData, metadata) {
 // Helper Functions
 // ----------------------
 
+// Simple CLI arg parser for: [-i [dir]] <issuer> <taxon>
+function parseArgs(argv) {
+  let images = false;
+  let imagesDir = "images";
+  const args = [...argv.slice(2)]; // drop node + script
+
+  // detect -i / --images anywhere before the final two required args
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "-i" || a === "--images") {
+      images = true;
+      // next token as dir if present and not another flag and not one of the final two required args (issuer, taxon)
+      const next = args[i + 1];
+      if (next && !next.startsWith("-")) {
+        // We can only safely treat it as a dir if there are still 3+ tokens remaining (dir + issuer + taxon)
+        if (args.length - (i + 1) >= 3) {
+          imagesDir = next;
+          args.splice(i, 2); // remove flag and dir
+          i--;
+          continue;
+        }
+      }
+      args.splice(i, 1); // remove flag only
+      i--;
+    }
+  }
+
+  if (args.length < 2) {
+    console.error("Usage: node script.js [-i [output_dir]] <issuer address> <taxon>");
+    process.exit(1);
+  }
+
+  const issuer = args[0];
+  const taxon = parseInt(args[1], 10);
+  if (isNaN(taxon)) {
+    console.error("Taxon must be a number.");
+    process.exit(1);
+  }
+
+  return { issuer, taxon, images, imagesDir };
+}
+
 // Decode a hex-encoded string to UTF-8.
 function decodeHex(hexStr) {
   try {
@@ -109,18 +163,28 @@ function decodeHex(hexStr) {
   }
 }
 
+// Normalize IPFS/HTTP URL
+function normalizeURI(uri) {
+  if (!uri) return null;
+  if (uri.startsWith("ipfs://")) {
+    const hash = uri.slice(7).replace(/^ipfs\//, "");
+    return `${IPFS_GATEWAY}/${hash}`;
+  }
+  // occasionally metadata puts just the CID
+  if (/^[a-zA-Z0-9]{46,}$/.test(uri)) {
+    return `${IPFS_GATEWAY}/${uri}`;
+  }
+  return uri;
+}
+
 // Given a URI (which might be an IPFS link), fetch its JSON metadata.
 async function fetchMetadata(uri) {
   if (!uri) return {};
-  let url = uri;
-  if (uri.startsWith("ipfs://")) {
-    const ipfsHash = uri.slice(7);
-    url = `https://ipfs.io/ipfs/${ipfsHash}`;
-  }
+  let url = normalizeURI(uri);
   try {
     const res = await fetch(url);
     if (!res.ok) {
-      console.error(`HTTP error! status: ${res.status}`);
+      console.error(`HTTP error fetching metadata! status: ${res.status}`);
       return {};
     }
     const json = await res.json();
@@ -128,6 +192,49 @@ async function fetchMetadata(uri) {
   } catch (err) {
     console.error("Error fetching metadata:", err);
     return {};
+  }
+}
+
+// Fetch a binary (image) and save to disk; return saved path
+async function downloadImageToFile(imageURI, outDir, nftId) {
+  const url = normalizeURI(imageURI);
+  if (!url) return null;
+
+  // ensure dir
+  fs.mkdirSync(outDir, { recursive: true });
+
+  let ext = "";
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.error(`HTTP error downloading image for ${nftId}: ${res.status}`);
+      return null;
+    }
+    const ct = res.headers.get("content-type") || "";
+    if (ct.includes("image/")) {
+      const subtype = ct.split("/")[1].split(";")[0].trim();
+      // common normalizations
+      if (subtype === "jpeg") ext = ".jpg";
+      else if (subtype) ext = "." + subtype;
+    }
+    if (!ext) {
+      // try to infer from URL
+      const parsed = new URL(url);
+      const m = parsed.pathname.match(/\.(\w+)(?:$|\?)/);
+      if (m) ext = "." + m[1].toLowerCase();
+    }
+    if (!ext) ext = ".bin";
+
+    const filename = `${nftId}${ext}`;
+    const fullPath = path.join(outDir, filename);
+
+    const buf = Buffer.from(await res.arrayBuffer());
+    fs.writeFileSync(fullPath, buf);
+    console.log(`Saved image: ${fullPath}`);
+    return fullPath;
+  } catch (err) {
+    console.error(`Error downloading image for ${nftId}:`, err);
+    return null;
   }
 }
 
@@ -196,17 +303,8 @@ async function getNFTInfo(client, nft_id) {
 // Main Process
 // ----------------------
 async function main() {
-  // Get issuer address and taxon from command line arguments.
-  if (process.argv.length < 4) {
-    console.error("Usage: node script.js <issuer address> <taxon>");
-    process.exit(1);
-  }
-  const ISSUER_ADDRESS = process.argv[2];
-  const TAXON = parseInt(process.argv[3], 10);
-  if (isNaN(TAXON)) {
-    console.error("Taxon must be a number.");
-    process.exit(1);
-  }
+  const { issuer: ISSUER_ADDRESS, taxon: TAXON, images: DOWNLOAD_IMAGES, imagesDir: IMAGES_DIR } =
+    parseArgs(process.argv);
 
   // Create the base table if it doesn't exist.
   await createTable();
@@ -218,6 +316,11 @@ async function main() {
   // Fetch NFTs by issuer.
   const nfts = await getNFTsByIssuer(ISSUER_ADDRESS, TAXON);
   console.log(`Fetched ${nfts.length} NFTs.`);
+
+  // If we're going to save local paths, make sure column exists ahead of time
+  if (DOWNLOAD_IMAGES) {
+    await ensureColumnExists("local_image");
+  }
 
   // Process each NFT: retrieve additional info (URI), fetch metadata, then store in DB.
   for (const nft of nfts) {
@@ -232,10 +335,28 @@ async function main() {
 
     // Fetch metadata JSON from the URI.
     const metadata = await fetchMetadata(uri);
-    console.log(`Fetched metadata for NFT ${nft.nft_id}:`, metadata);
+    console.log(`Fetched metadata for NFT ${nft.nft_id}:`, metadata?.name || "(no name)");
+
+    let localImagePath = null;
+
+    if (DOWNLOAD_IMAGES) {
+      // prefer metadata.image; fallbacks if collections use different keys
+      const imageField =
+        metadata?.image ||
+        metadata?.image_url ||
+        metadata?.imageURI ||
+        metadata?.imageUrl ||
+        null;
+
+      if (imageField) {
+        localImagePath = await downloadImageToFile(imageField, IMAGES_DIR, nft.nft_id);
+      } else {
+        console.warn(`No image field found in metadata for ${nft.nft_id}.`);
+      }
+    }
 
     // Store NFT data and metadata in the SQLite database.
-    await storeNFTInDatabase(nft, metadata);
+    await storeNFTInDatabase(nft, metadata, localImagePath);
 
     // Small delay to pace requests.
     await new Promise((resolve) => setTimeout(resolve, 100));
